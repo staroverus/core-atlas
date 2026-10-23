@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title="Генератор фотоатласа керна", layout="wide", page_icon="🪨")
 
 st.title("🪨 Автоматический генератор фотоатласа керна")
-st.markdown("Сборка пометровых PDF-альбомов высокого разрешения по 4 метра на страницу.")
+st.markdown("Сборка пометровых PDF-альбомов высокого разрешения (300 DPI) по 4 метра на страницу.")
 
 # Боковая панель параметров
 with st.sidebar:
@@ -18,7 +18,7 @@ with st.sidebar:
     meters_per_page = st.selectbox("Метров на страницу:", [4, 2, 5, 6], index=0)
 
 uploaded_files = st.file_uploader(
-    "Загрузите фотографии ящиков (например: 0-6.jpg, 6-12.jpg ... до 200 м):",
+    "Загрузите фотографии ящиков (например: 0-6.jpg, 6-12.jpg ...):",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
@@ -39,6 +39,11 @@ def parse_interval(filename):
     if len(matches) >= 2:
         return int(matches[0]), int(matches[1])
     return 999999, 999999
+
+# Инициализация состояния для хранения PDF
+if "pdf_data" not in st.session_state:
+    st.session_state.pdf_data = None
+    st.session_state.pdf_name = ""
 
 if uploaded_files:
     sorted_files = sorted(uploaded_files, key=lambda f: parse_interval(f.name)[0])
@@ -66,21 +71,20 @@ if uploaded_files:
                 n_rows = end_d - start_d
                 slices = y_slices_2 if n_rows == 2 else y_slices_6
                 
-                # КРИТИЧЕСКИ ВАЖНО: сброс курсора файла в начало перед повторным чтением
-                file_obj.seek(0)
-                
-                img = Image.open(file_obj)
-                w, h = img.size
-                x1, x2 = int(w * 0.04), int(w * 0.94)
-                
-                for r in range(min(n_rows, len(slices))):
-                    depth = start_d + r
-                    y1 = int(slices[r][0] * h)
-                    y2 = int(slices[r][1] * h)
-                    crop = img.crop((x1, y1, x2, y2))
-                    meter_list.append((depth, crop))
+                # Защищенное чтение: создаем независимую копию байтов, не закрывая сам upload
+                file_bytes = io.BytesIO(file_obj.getvalue())
+                with Image.open(file_bytes) as img:
+                    w, h = img.size
+                    x1, x2 = int(w * 0.04), int(w * 0.94)
                     
-                img.close()
+                    for r in range(min(n_rows, len(slices))):
+                        depth = start_d + r
+                        y1 = int(slices[r][0] * h)
+                        y2 = int(slices[r][1] * h)
+                        # .copy() изолирует фрагмент в памяти
+                        crop = img.crop((x1, y1, x2, y2)).copy()
+                        meter_list.append((depth, crop))
+                        
                 progress.progress((i + 1) / (len(sorted_files) * 2))
                 
             status.text("Формирование страниц альбома с крупной оцифровкой...")
@@ -215,9 +219,13 @@ if uploaded_files:
             pdf_pages[0].save(
                 pdf_buf, format="PDF", save_all=True, append_images=pdf_pages[1:], resolution=300.0, quality=95
             )
-            pdf_buf.seek(0)
             
-            # Очистка объектов из оперативной памяти
+            # Сохранение готового файла в постоянное состояние сессии
+            mode_tag = "Vert" if "Вертикальный" in layout_mode else "Horiz"
+            st.session_state.pdf_data = pdf_buf.getvalue()
+            st.session_state.pdf_name = f"{well_name}_{mode_tag}_{first_m}-{last_m}m.pdf"
+            
+            # Очистка памяти
             del pdf_pages
             del meter_list
             gc.collect()
@@ -226,15 +234,17 @@ if uploaded_files:
             progress.empty()
             st.success(f"Альбом готов! Сформировано {total_pages} страниц (300 DPI).")
             
-            mode_tag = "Vert" if "Вертикальный" in layout_mode else "Horiz"
-            st.download_button(
-                label="📥 Скачать готовый PDF-альбом",
-                data=pdf_buf,
-                file_name=f"{well_name}_{mode_tag}_{first_m}-{last_m}m.pdf",
-                mime="application/pdf",
-                type="primary"
-            )
         except Exception as e:
             status.empty()
             progress.empty()
             st.error(f"Произошла ошибка при обработке: {e}")
+
+# Кнопка скачивания отображается всегда, пока сформирован PDF
+if st.session_state.pdf_data is not None:
+    st.download_button(
+        label="📥 Скачать готовый PDF-альбом",
+        data=st.session_state.pdf_data,
+        file_name=st.session_state.pdf_name,
+        mime="application/pdf",
+        type="primary"
+    )
